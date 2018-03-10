@@ -79,24 +79,18 @@ async def async_setup(hass, config):
     if DOMAIN not in hass.data:
         hass.data[DOMAIN] = {}
 
-    async def async_bridge_discovered(service, discovery_info):
-        """Dispatcher for Hue discovery events."""
-        # Ignore emulated hue
-        if "HASS Bridge" in discovery_info.get('name', ''):
-            return
-
-        await async_setup_bridge(
-            hass, discovery_info['host'],
-            'phue-{}.conf'.format(discovery_info['serial']))
-
-    discovery.async_listen(hass, SERVICE_HUE, async_bridge_discovered)
-
     # User has configured bridges
     if CONF_BRIDGES in conf:
         bridges = conf[CONF_BRIDGES]
 
     # Component is part of config but no bridges specified, discover.
     elif DOMAIN in config:
+        # Filter out configured hosts. They will be set up via config entries
+        # after setup is done.
+        configured_hosts = set(
+            entry.data['bridge_id'] for entry
+            in hass.config_entries.async_entries(DOMAIN))
+
         # discover from nupnp
         websession = aiohttp_client.async_get_clientsession(hass)
 
@@ -107,8 +101,7 @@ async def async_setup(hass, config):
         bridges = [BRIDGE_CONFIG_SCHEMA({
             CONF_HOST: entry['internalipaddress'],
             CONF_FILENAME: '.hue_{}.conf'.format(entry['id']),
-        }) for entry in hosts]
-
+        }) for entry in hosts if entry['id'] not in configured_hosts]
     else:
         # Component not specified in config, we're loaded via discovery
         bridges = []
@@ -382,6 +375,27 @@ class HueFlowHandler(config_entries.ConfigFlowHandler):
             step_id='link',
             errors=errors,
         )
+
+    async def async_step_discovery(self, discovery_info):
+        """Handle a discovered Hue bridge."""
+        # Filter out emulated Hue
+        if "HASS Bridge" in discovery_info.get('name', ''):
+            return self.async_abort(
+                reason='Discovered bridge is Home Assistant emulated Hue.'
+            )
+
+        host = discovery_info.get('host')
+        serial = discovery_info.get('serial')
+
+        if serial in (entry.data['bridge_id'] for entry
+                      in self.hass.config_entries.async_entries(DOMAIN)):
+            # Ignore bridge that is already set up.
+            return self.async_abort(
+                reason='Discovered bridge is already configured.'
+            )
+
+        self.host = host
+        return await self.async_step_link()
 
 
 async def async_setup_entry(hass, entry):
